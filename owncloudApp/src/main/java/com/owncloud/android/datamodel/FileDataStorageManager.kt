@@ -91,6 +91,7 @@ class FileDataStorageManager(
 
     fun fileExists(path: String): Boolean = getFileByPath(path) != null
 
+
     fun getFolderContent(f: OCFile?): List<OCFile> {
         return if (f != null && f.isFolder && f.id != -1L) {
             // TODO: Remove !!

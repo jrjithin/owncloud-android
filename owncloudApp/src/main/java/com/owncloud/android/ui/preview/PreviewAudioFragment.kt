@@ -90,6 +90,7 @@ class PreviewAudioFragment : FileFragment() {
 
     private val previewAudioViewModel by viewModel<PreviewAudioViewModel>()
     private val fileOperationsViewModel: FileOperationsViewModel by inject()
+    private var parentDir:OCFile? = null
 
     /**
      * {@inheritDoc}
@@ -132,12 +133,14 @@ class PreviewAudioFragment : FileFragment() {
         val args = arguments
         if (savedInstanceState == null) {
             file = args!!.getParcelable(EXTRA_FILE)
+            parentDir = args!!.getParcelable(EXTRA_FOLDER)
             setFile(file)
             account = args.getParcelable(EXTRA_ACCOUNT)
             savedPlaybackPosition = args.getInt(EXTRA_PLAY_POSITION)
             autoplay = args.getBoolean(EXTRA_PLAYING)
         } else {
             file = savedInstanceState.getParcelable(EXTRA_FILE)
+            parentDir = savedInstanceState.getParcelable(EXTRA_FOLDER)
             setFile(file)
             account = savedInstanceState.getParcelable(EXTRA_ACCOUNT)
             savedPlaybackPosition = savedInstanceState.getInt(EXTRA_PLAY_POSITION, args!!.getInt(EXTRA_PLAY_POSITION))
@@ -181,6 +184,7 @@ class PreviewAudioFragment : FileFragment() {
         super.onSaveInstanceState(outState)
         Timber.v("onSaveInstanceState")
         outState.putParcelable(EXTRA_FILE, file)
+        outState.putParcelable(EXTRA_FOLDER,parentDir)
         outState.putParcelable(EXTRA_ACCOUNT, account)
         if (mediaServiceBinder != null) {
             outState.putInt(EXTRA_PLAY_POSITION, mediaServiceBinder!!.currentPosition)
@@ -316,10 +320,10 @@ class PreviewAudioFragment : FileFragment() {
             Timber.d("restarting playback of %s", file.storagePath)
             autoplay = true
             savedPlaybackPosition = 0
-            mediaServiceBinder?.start(account, file, true, 0)
+            mediaServiceBinder?.start(account, file, parentDir, true, 0)
         } else if (mediaServiceBinder?.isPlaying(file) == false) {
             Timber.d("starting playback of %s", file.storagePath)
-            mediaServiceBinder?.start(account, file, autoplay, savedPlaybackPosition)
+            mediaServiceBinder?.start(account, file,parentDir, autoplay, savedPlaybackPosition)
         } else if (mediaServiceBinder?.isPlaying == false && autoplay) {
             mediaServiceBinder?.start()
             mediaController?.updatePausePlay()
@@ -401,6 +405,7 @@ class PreviewAudioFragment : FileFragment() {
 
     companion object {
         const val EXTRA_FILE = "FILE"
+        const val EXTRA_FOLDER = "PARENT_FOLDER"
         const val EXTRA_ACCOUNT = "ACCOUNT"
         private const val EXTRA_PLAY_POSITION = "PLAY_POSITION"
         private const val EXTRA_PLAYING = "PLAYING"
@@ -417,6 +422,7 @@ class PreviewAudioFragment : FileFragment() {
          */
         fun newInstance(
             file: OCFile?,
+            parentDir:OCFile?,
             account: Account?,
             startPlaybackPosition: Int,
             autoplay: Boolean
@@ -424,6 +430,7 @@ class PreviewAudioFragment : FileFragment() {
             val args = Bundle().apply {
                 putParcelable(EXTRA_FILE, file)
                 putParcelable(EXTRA_ACCOUNT, account)
+                putParcelable(EXTRA_FOLDER,parentDir)
                 putInt(EXTRA_PLAY_POSITION, startPlaybackPosition)
                 putBoolean(EXTRA_PLAYING, autoplay)
             }

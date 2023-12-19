@@ -35,7 +35,7 @@ import timber.log.Timber;
  *  Provides the operations of {@link MediaController.MediaPlayerControl}, and an extra method to check if
  *  an {@link OCFile} instance is handled by the MediaService.
  */
-public class MediaServiceBinder extends Binder implements MediaController.MediaPlayerControl {
+public class MediaServiceBinder extends Binder implements MediaController.MediaPlayerControl, MediaService.AutoPlay {
 
     /**
      * {@link MediaService} instance to access with the binder
@@ -106,6 +106,7 @@ public class MediaServiceBinder extends Binder implements MediaController.MediaP
 
     /**
      * Reports if the MediaService is playing a file or not.
+
      *
      * Considers that the file is being played when it is in preparation because the expected
      * client of this method is a {@link MediaController} , and we do not want that the 'play'
@@ -139,11 +140,12 @@ public class MediaServiceBinder extends Binder implements MediaController.MediaP
         mService.processPlayRequest();  // this will finish the service if there is no file preloaded to play
     }
 
-    public void start(Account account, OCFile file, boolean playImmediately, int position) {
+    public void start(Account account, OCFile file, OCFile folder, boolean playImmediately, int position) {
         Timber.d("Loading and starting through binder...");
         Intent i = new Intent(mService, MediaService.class);
         i.putExtra(MediaService.EXTRA_ACCOUNT, account);
         i.putExtra(MediaService.EXTRA_FILE, file);
+        i.putExtra(MediaService.EXTRA_FOLDER,folder);
         i.putExtra(MediaService.EXTRA_PLAY_ON_LOAD, playImmediately);
         i.putExtra(MediaService.EXTRA_START_POSITION, position);
         i.setAction(MediaService.ACTION_PLAY_FILE);
@@ -169,6 +171,16 @@ public class MediaServiceBinder extends Binder implements MediaController.MediaP
     @Override
     public int getAudioSessionId() {
         return 1; // not really used
+    }
+
+    @Override
+    public void setAutoPlay(boolean enabled) {
+        mService.setAutoPlayEnabled(enabled);
+    }
+
+    @Override
+    public boolean isAutoPlayeEnabled() {
+        return mService.isAutoPlayEnabled();
     }
 
 }

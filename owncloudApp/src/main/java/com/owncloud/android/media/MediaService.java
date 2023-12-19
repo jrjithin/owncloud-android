@@ -28,6 +28,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.MediaPlayer.OnCompletionListener;
@@ -35,24 +36,48 @@ import android.media.MediaPlayer.OnErrorListener;
 import android.media.MediaPlayer.OnPreparedListener;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiManager.WifiLock;
+import android.os.Build;
 import android.os.FileObserver;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.util.Log;
 import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
+import androidx.lifecycle.LifecycleService;
+import androidx.lifecycle.Observer;
 import com.owncloud.android.R;
+import com.owncloud.android.data.providers.SharedPreferencesProvider;
+import com.owncloud.android.datamodel.FileDataStorageManager;
+import com.owncloud.android.db.PreferenceManager;
+import com.owncloud.android.domain.utils.Event;
 import com.owncloud.android.presentation.authentication.AccountUtils;
 import com.owncloud.android.domain.files.model.OCFile;
+import com.owncloud.android.presentation.common.UIResult;
+import com.owncloud.android.presentation.files.operations.FileOperation;
+import com.owncloud.android.presentation.files.operations.FileOperationsViewModel;
 import com.owncloud.android.ui.activity.FileActivity;
 import com.owncloud.android.ui.activity.FileDisplayActivity;
+import com.owncloud.android.utils.FileStorageUtils;
 import com.owncloud.android.utils.NotificationUtils;
+import com.owncloud.android.utils.SortFilesUtils;
+import kotlin.Lazy;
+import kotlin.Unit;
 import timber.log.Timber;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Queue;
+import java.util.Vector;
+import java.util.stream.Collectors;
 
 import static com.owncloud.android.utils.NotificationConstantsKt.MEDIA_SERVICE_NOTIFICATION_CHANNEL_ID;
+import static org.koin.java.KoinJavaComponent.inject;
 
 /**
  * Service that handles media playback, both audio and video.
@@ -60,7 +85,7 @@ import static com.owncloud.android.utils.NotificationConstantsKt.MEDIA_SERVICE_N
  * Waits for Intents which signal the service to perform specific operations: Play, Pause,
  * Rewind, etc.
  */
-public class MediaService extends Service implements OnCompletionListener, OnPreparedListener,
+public class MediaService extends LifecycleService implements OnCompletionListener, OnPreparedListener,
         OnErrorListener, AudioManager.OnAudioFocusChangeListener {
 
     private static final String MY_PACKAGE = MediaService.class.getPackage() != null ?
@@ -73,9 +98,12 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
 
     /// Keys to add extras to the action
     public static final String EXTRA_FILE = MY_PACKAGE + ".extra.FILE";
+    public static final String EXTRA_FOLDER = MY_PACKAGE + ".extra.FOLDER";
     public static final String EXTRA_ACCOUNT = MY_PACKAGE + ".extra.ACCOUNT";
     public static String EXTRA_START_POSITION = MY_PACKAGE + ".extra.START_POSITION";
     public static final String EXTRA_PLAY_ON_LOAD = MY_PACKAGE + ".extra.PLAY_ON_LOAD";
+    public static final String AUTO_PLAY_PREF = "auto_play_pref";
+
 
     /** Error code for specific messages - see regular error codes at {@link MediaPlayer} */
     public static final int OC_MEDIA_ERROR = 0;
@@ -97,8 +125,16 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
 
     /** Reference to the system AccountManager */
     private AccountManager mAccountManager;
+    /** FileOperationsViewModel silent file operations for autoplay **/
+    private Lazy<FileOperationsViewModel> fileOperationsViewModel = inject(FileOperationsViewModel.class);
 
-    /** Values to indicate the state of the service */
+    /** Shared preference for Autoplay preference**/
+    private Lazy<SharedPreferencesProvider> sharedPreferences = inject(SharedPreferencesProvider.class);
+
+    /** Queue for files to Play **/
+    private ArrayList<OCFile> playList = new ArrayList<>();
+    private boolean isAutoPlayEnabled = true;
+     /** Values to indicate the state of the service */
     enum State {
         STOPPED,
         PREPARING,
@@ -132,6 +168,10 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
 
     /** File being played */
     private OCFile mFile;
+
+    private OCFile mParentDir;
+
+    private FileDataStorageManager mStorageManager;
 
     /** Observer being notified if played file is deleted */
     private MediaFileObserver mFileObserver = null;
@@ -262,10 +302,11 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
      */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        playList = new ArrayList<>();
         String action = intent.getAction();
         if (action.equals(ACTION_PLAY_FILE)) {
             processPlayFileRequest(intent);
-
+            syncFiles();
         } else if (action.equals(ACTION_STOP_ALL)) {
             processStopRequest(true);
         } else if (action.equals(ACTION_STOP_FILE)) {
@@ -292,6 +333,7 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
     private void processPlayFileRequest(Intent intent) {
         if (mState != State.PREPARING) {
             mFile = intent.getExtras().getParcelable(EXTRA_FILE);
+            mParentDir = intent.getExtras().getParcelable(EXTRA_FOLDER);
             mAccount = intent.getExtras().getParcelable(EXTRA_ACCOUNT);
             mPlayOnPrepared = intent.getExtras().getBoolean(EXTRA_PLAY_ON_LOAD, false);
             mStartPosition = intent.getExtras().getInt(EXTRA_START_POSITION, 0);
@@ -369,7 +411,13 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
             stopSelf();     // service is no longer necessary
         }
     }
-
+    protected void stopBeforePlayingNext(boolean force) {
+        if (mState != State.PREPARING || force) {
+            mState = State.STOPPED;
+            stopFileObserver();
+            releaseResources(true);
+        }
+    }
     /**
      * Releases resources used by the service for playback. This includes the "foreground service"
      * status and notification, the wake locks and possibly the MediaPlayer.
@@ -535,7 +583,12 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
     public void onCompletion(MediaPlayer player) {
         Toast.makeText(this, String.format(getString(R.string.media_event_done), mFile.getFileName()),
                 Toast.LENGTH_LONG).show();
-        if (mMediaController != null) {
+        if (isAutoPlayEnabled() && nextToPlay()!=null){
+            //Autoplay play next
+            stopBeforePlayingNext(true);
+            mFile = nextToPlay();
+            processPlayRequest();
+        }else if (mMediaController != null) {
             // somebody is still bound to the service
             player.seekTo(0);
             processPauseRequest();
@@ -724,6 +777,21 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
         return mFile;
     }
 
+    protected int playingIndex(){return playList.indexOf(mFile);}
+
+    protected OCFile nextToPlay(){
+        int index = playingIndex();
+        if(index<playList.size()-1){
+            return playList.get(index+1);
+        }
+        return null;
+    }
+
+    public void playFile(OCFile file) {
+        mFile = file;
+        playMedia();
+    }
+
     /**
      * Accesses the current {@link State} of the MediaService.
      *
@@ -748,16 +816,76 @@ public class MediaService extends Service implements OnCompletionListener, OnPre
     private class MediaFileObserver extends FileObserver {
 
         public MediaFileObserver(String path) {
-            super((new File(path)).getParent(), FileObserver.DELETE | FileObserver.MOVED_FROM);
+            super((new File(path)).getParent(), FileObserver.DELETE | FileObserver.MOVED_FROM | FileObserver.CREATE);
         }
 
         @Override
         public void onEvent(int event, String path) {
-            if (path != null && path.equals(mFile.getFileName())) {
-                Timber.d("Media file deleted or moved out of sight, stopping playback");
-                processStopRequest(true);
+            switch (event){
+                case FileObserver.MOVED_FROM:
+                case FileObserver.DELETE:
+                    if (path != null && path.equals(mFile.getFileName())) {
+                        Timber.d("Media file deleted or moved out of sight, stopping playback");
+                        processStopRequest(true);
+                    }
+                    break;
+                case FileObserver.CREATE:
+                    //if new audio came, add to queue
+                    break;
+
             }
+
         }
+    }
+    private void syncFiles(){
+        playList = new ArrayList<>();
+        Vector<OCFile> files = new Vector<>(getStorageManager().getFolderContent(mParentDir));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            files.removeIf(file-> !file.isAudio());
+        }else {
+             for (OCFile file: files){
+                 if (!file.isAudio())files.remove(file);
+             }
+        }
+        playList.addAll(files);
+    }
+
+    private List<OCFile> sortFileList(List<OCFile> files) {
+        // Read sorting order, default to sort by name ascending
+        FileStorageUtils.mSortOrderFileDisp = PreferenceManager.getSortOrder(this, FileStorageUtils.FILE_DISPLAY_SORT);
+        FileStorageUtils.mSortAscendingFileDisp = PreferenceManager.getSortAscending(this,
+                FileStorageUtils.FILE_DISPLAY_SORT);
+
+        files = new SortFilesUtils().sortFiles(files, FileStorageUtils.mSortOrderFileDisp,
+                FileStorageUtils.mSortAscendingFileDisp);
+        return files;
+    }
+    private void queueFilesInFolder(){
+
+    }
+    public FileDataStorageManager getStorageManager() {
+        if (mStorageManager == null) {
+            return mStorageManager = new FileDataStorageManager(mAccount);
+        } else {
+            return mStorageManager;
+        }
+    }
+    public void setAutoPlayEnabled(boolean autoPlayEnabled) {
+        isAutoPlayEnabled = autoPlayEnabled;
+        sharedPreferences.getValue().putBoolean(AUTO_PLAY_PREF,autoPlayEnabled);
+    }
+
+    public boolean isAutoPlayEnabled() {
+        return isAutoPlayEnabled;
+    }
+
+
+    /**
+     * AutoPlay settings interface for Binder
+     */
+    public interface AutoPlay{
+        boolean  isAutoPlayeEnabled();
+        void setAutoPlay(boolean enabled);
     }
 
 }

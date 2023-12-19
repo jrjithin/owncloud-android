@@ -437,8 +437,10 @@ class FileDisplayActivity : FileActivity(),
             PreviewAudioFragment.canBePreviewed(file) -> {
                 val startPlaybackPosition = intent.getIntExtra(PreviewVideoActivity.EXTRA_PLAY_POSITION, 0)
                 val autoplay = intent.getBooleanExtra(PreviewVideoActivity.EXTRA_AUTOPLAY, true)
+                val parent = storageManager.getFileById(file.parentId!!)
                 PreviewAudioFragment.newInstance(
                     file,
+                    parent,
                     account,
                     startPlaybackPosition,
                     autoplay
@@ -1518,8 +1520,10 @@ class FileDisplayActivity : FileActivity(),
      * in milliseconds.
      */
     fun startAudioPreview(file: OCFile, startPlaybackPosition: Int) {
+        val parent = storageManager.getFileById(file.parentId!!)
         val mediaFragment = PreviewAudioFragment.newInstance(
             file,
+            parent,
             account,
             startPlaybackPosition,
             true
